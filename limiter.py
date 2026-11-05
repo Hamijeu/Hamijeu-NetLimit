@@ -26,7 +26,7 @@ class Pacer:
         return max(now, deadline)
 
 
-def filters(upstream, hotspot, ipv6_addresses=()):
+def filters(upstream, hotspot, ipv6_addresses=(), hotspot_upstream=None):
     if upstream is not None:
         for name, direction, field in (
             ("laptop download", "inbound", "DstAddr"),
@@ -42,7 +42,10 @@ def filters(upstream, hotspot, ipv6_addresses=()):
         outside_source = f"(ip.SrcAddr < {first} or ip.SrcAddr > {last})"
         outside_destination = f"(ip.DstAddr < {first} or ip.DstAddr > {last})"
         yield "hotspot download", True, f"ip and {destination} and {outside_source}"
-        yield "hotspot upload", True, f"ip and {source} and {outside_destination}"
+        translated_source = hotspot_upstream or upstream
+        if translated_source is None:
+            raise ValueError("Select the Internet adapter for hotspot upload limiting")
+        yield "hotspot upload", True, f"ip and ip.SrcAddr == {translated_source} and {outside_destination}"
 
 
 def expired(captured, current, frequency):
@@ -67,12 +70,14 @@ class DownloadQueue:
         return True
 
 
-def pump(handle, pacer, stopped, errors, queue_frequency=None):
+def pump(handle, pacer, stopped, errors, queue_frequency=None, stats=None):
     download_queue = DownloadQueue(queue_frequency) if queue_frequency else None
     counter = ctypes.c_longlong()
     try:
         while not stopped.is_set():
             packet = handle.recv()
+            if stats is not None:
+                stats["captured"] += len(packet.raw)
             if download_queue is not None:
                 ctypes.windll.kernel32.QueryPerformanceCounter(ctypes.byref(counter))
                 if download_queue.should_drop(packet.timestamp, counter.value):
@@ -80,6 +85,8 @@ def pump(handle, pacer, stopped, errors, queue_frequency=None):
             deadline = pacer.reserve(len(packet.raw), monotonic())
             if deadline is not None and not stopped.wait(max(0, deadline - monotonic())):
                 handle.send(packet, recalculate_checksum=False)
+                if stats is not None:
+                    stats["sent"] += len(packet.raw)
     except Exception as exc:
         if not stopped.is_set():
             errors.put(exc)
@@ -138,6 +145,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--upstream-ip", type=IPv4Address, help="Laptop IPv4 on the USB tethering adapter")
     parser.add_argument("--upstream-ipv6", type=IPv6Address, action="append", default=[])
+    parser.add_argument("--hotspot-upstream-ip", type=IPv4Address)
     parser.add_argument("--hotspot-network", type=IPv4Network, help="IPv4 subnet of the Windows hotspot")
     parser.add_argument("--download", type=float, default=5, help="Mbps per enabled mode")
     parser.add_argument("--upload", type=float, default=5, help="Mbps per enabled mode")
@@ -159,7 +167,7 @@ def main():
 
     from pydivert import Layer, Param, WinDivert
 
-    rules = list(filters(args.upstream_ip, args.hotspot_network, args.upstream_ipv6))
+    rules = list(filters(args.upstream_ip, args.hotspot_network, args.upstream_ipv6, args.hotspot_upstream_ip))
     if args.check:
         for name, forwarded, expression in rules:
             layer = Layer.NETWORK_FORWARD if forwarded else Layer.NETWORK
@@ -187,6 +195,7 @@ def main():
     frequency = ctypes.c_longlong()
     if args.low_latency and not ctypes.windll.kernel32.QueryPerformanceFrequency(ctypes.byref(frequency)):
         raise RuntimeError("Could not read the Windows performance counter frequency")
+    traffic_stats = {}
     handles = []
     workers = []
     try:
@@ -200,7 +209,9 @@ def main():
                 handle.set_param(Param.QUEUE_TIME, 128)
             rate = rates[name]
             queue_frequency = frequency.value if name.endswith("download") else None
-            worker = Thread(target=pump, args=(handle, Pacer(rate), stopped, errors, queue_frequency), daemon=True)
+            stats = {"captured": 0, "sent": 0}
+            traffic_stats[name] = stats
+            worker = Thread(target=pump, args=(handle, Pacer(rate), stopped, errors, queue_frequency, stats), daemon=True)
             worker.start()
             workers.append(worker)
             print(f"{name}: {rate:g} Mbps")
@@ -230,8 +241,16 @@ def main():
         elif args.verify_speed:
             print("STATUS Hotspot active. Verify speed from a connected client.", flush=True)
         print("Press Ctrl+C to stop.")
+        report_at = monotonic()
         while not stopped.wait(.25):
-            pass
+            if args.hotspot_network and monotonic() - report_at >= 2:
+                report_at = monotonic()
+                download = traffic_stats["hotspot download"]
+                upload = traffic_stats["hotspot upload"]
+                print("STATUS Hotspot diagnostic: "
+                      f"DL captured {download['captured']/1_000_000:.2f} MB / sent {download['sent']/1_000_000:.2f} MB; "
+                      f"UL captured {upload['captured']/1_000_000:.2f} MB / sent {upload['sent']/1_000_000:.2f} MB. "
+                      "Capture counters do not verify enforcement.", flush=True)
         if not errors.empty():
             raise errors.get()
     except KeyboardInterrupt:

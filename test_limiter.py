@@ -88,3 +88,12 @@ class SpeedRetryTest(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 verify_speed("10.0.0.7", 1, 1, Event())
             self.assertEqual(measure.call_count, 2)
+
+class HotspotNatTest(unittest.TestCase):
+    def test_upload_targets_post_nat_upstream_address(self):
+        from ipaddress import ip_address, ip_network
+        from limiter import filters
+        rules = list(filters(None, ip_network("192.168.137.0/24"),
+                             hotspot_upstream=ip_address("192.0.2.10")))
+        self.assertIn("ip.SrcAddr == 192.0.2.10", rules[1][2])
+        self.assertIn("ip.DstAddr < 192.168.137.0", rules[1][2])

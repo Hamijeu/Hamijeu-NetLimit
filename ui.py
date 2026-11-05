@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 
-APP_NAME = "Hamijeu NetLimit V1.0"
+APP_NAME = "Hamijeu NetLimit V1.1"
 APP_ICON = Path(__file__).with_name("app.ico")
 
 
@@ -23,6 +23,7 @@ def command(address, network, laptop, hotspot, ipv6_addresses=(), low_latency=Fa
         for ipv6 in ipv6_addresses:
             args += ["--upstream-ipv6", ipv6]
     if hotspot:
+        args += ["--hotspot-upstream-ip", address]
         args += ["--hotspot-network", network, "--hotspot-download", hotspot[0], "--hotspot-upload", hotspot[1]]
     if low_latency:
         args.append("--low-latency")
@@ -83,8 +84,32 @@ def set_taskbar_icon(root):
             user.SendMessageW(window, 0x0080, kind, icon)
 
 
+def acquire_instance(name=r"Local\HamijeuNetLimit"):
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    ctypes.set_last_error(0)
+    handle = kernel.CreateMutexW(None, False, name)
+    error = ctypes.get_last_error()
+    if not handle:
+        raise ctypes.WinError(error)
+    if error == 183:
+        kernel.CloseHandle(ctypes.c_void_p(handle))
+        return None
+    return handle
+
+
 def main():
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Hamijeu.NetLimit")
+    instance_handle = acquire_instance()
+    if instance_handle is None:
+        ctypes.windll.user32.MessageBoxW(
+            None, "Hamijeu NetLimit is already running. Open it from the system tray.",
+            APP_NAME, 0x40)
+        return
     root = tk.Tk()
     root.title(APP_NAME)
     root.iconbitmap(default=str(APP_ICON))
@@ -180,9 +205,9 @@ def main():
         if not laptop.get() and not hotspot.get():
             messagebox.showinfo("Select a mode", "Enable Laptop, Hotspot clients, or both.")
             return
-        if laptop.get() and not refresh():
+        if (laptop.get() or hotspot.get()) and not refresh():
             return
-        if laptop.get() and adapter.get() not in addresses:
+        if adapter.get() not in addresses:
             messagebox.showinfo("Select an adapter", "Choose the adapter that supplies internet.")
             return
         if not ctypes.windll.shell32.IsUserAnAdmin():
@@ -240,6 +265,10 @@ def main():
                 ))
             tray.run_detached()
         else:
+            from PIL import Image
+            with Image.open(APP_ICON) as source:
+                tray.icon = source.ico.getimage((32, 32)).copy()
+            tray.title = APP_NAME
             tray.visible = True
         root.withdraw()
 
@@ -301,7 +330,10 @@ def main():
     refresh()
     root.update_idletasks()
     set_taskbar_icon(root)
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(instance_handle))
 
 
 if __name__ == "__main__":

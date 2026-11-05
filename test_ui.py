@@ -5,8 +5,9 @@ class UiTest(unittest.TestCase):
     def test_wifi_or_usb_with_both_modes(self):
         for address in ("10.0.0.7", "192.168.42.10"):
             args = command(address, "192.168.137.0/24", ("4", "3"), ("5", "6"))
-            self.assertEqual(args[-12:], [
+            self.assertEqual(args[-14:], [
                 "--upstream-ip", address, "--download", "4", "--upload", "3",
+                "--hotspot-upstream-ip", address,
                 "--hotspot-network", "192.168.137.0/24",
                 "--hotspot-download", "5", "--hotspot-upload", "6",
             ])
@@ -31,3 +32,15 @@ class UiTest(unittest.TestCase):
             self.assertTrue(autostart(True, r"C:\Apps Folder\Hamijeu NetLimit V1.0.exe"))
         self.assertEqual(invoke.call_args.kwargs["env"]["NETLIMIT_AUTOSTART_EXE"], r"C:\Apps Folder\Hamijeu NetLimit V1.0.exe")
         self.assertEqual(invoke.call_args.kwargs["env"]["NETLIMIT_AUTOSTART_ACTION"], "enable")
+
+
+class InstanceTest(unittest.TestCase):
+    def test_second_instance_cannot_claim_same_slot(self):
+        import ctypes
+        from ui import acquire_instance
+        handle = acquire_instance(r"Local\HamijeuNetLimit-Verification")
+        try:
+            self.assertIsNotNone(handle)
+            self.assertIsNone(acquire_instance(r"Local\HamijeuNetLimit-Verification"))
+        finally:
+            ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
